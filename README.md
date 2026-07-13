@@ -62,9 +62,12 @@ Distance = 300.0
 
 ; Set to 0 to disable Pigeons.IV.log writes, or 1 to enable them.
 Logging = 1
+
+; Set to 1 to show an arrow above each collectible, or 0 for radar/map only.
+ShowWorldArrow = 0
 ```
 
-`Distance` values outside the valid range are clamped and saved back to the INI. Setting `Logging` to `0` prevents new log writes but does not delete an existing log file.
+`Distance` values outside the valid range are clamped and saved back to the INI. Setting `Logging` to `0` prevents new log writes but does not delete an existing log file. `ShowWorldArrow = 0` keeps the red collectible blips on the radar and pause map without drawing arrows over the objects in the world.
 
 ## Supported collectibles
 

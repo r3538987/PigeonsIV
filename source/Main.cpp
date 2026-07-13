@@ -67,6 +67,7 @@ struct Main {
     std::string m_logPath;
     float m_searchRadius = DEFAULT_SEARCH_RADIUS;
     bool m_loggingEnabled = true;
+    bool m_showWorldArrow = false;
     uint32_t m_lastScanTime = 0;
     uint32_t m_lastStatusLogTime = 0;
     int32_t m_lastEpisode = -1;
@@ -91,6 +92,40 @@ struct Main {
         Events::gameProcessEvent += [] {
             gInstance.OnGameProcess();
         };
+    }
+
+    bool LoadBooleanSetting(
+        const char* name,
+        bool defaultValue,
+        bool& saveConfig) {
+        auto& setting = m_config[name];
+        const int32_t defaultInteger = defaultValue ? 1 : 0;
+
+        if (setting.isEmpty()) {
+            setting = defaultInteger;
+            saveConfig = true;
+        }
+
+        const char* valueBegin = setting._value.c_str();
+        char* valueEnd = nullptr;
+        const long configuredValue = std::strtol(
+            valueBegin,
+            &valueEnd,
+            10);
+        while (valueEnd &&
+               std::isspace(static_cast<unsigned char>(*valueEnd))) {
+            ++valueEnd;
+        }
+
+        if (valueEnd == valueBegin ||
+            (valueEnd && *valueEnd != '\0') ||
+            (configuredValue != 0 && configuredValue != 1)) {
+            setting = defaultInteger;
+            saveConfig = true;
+            return defaultValue;
+        }
+
+        return configuredValue != 0;
     }
 
     void LoadConfig() {
@@ -127,33 +162,10 @@ struct Main {
             saveConfig = true;
         }
 
-        auto& logging = m_config["Logging"];
-        if (logging.isEmpty()) {
-            logging = 1;
-            saveConfig = true;
-        }
-
-        const char* loggingBegin = logging._value.c_str();
-        char* loggingEnd = nullptr;
-        const long configuredLogging = std::strtol(
-            loggingBegin,
-            &loggingEnd,
-            10);
-        while (loggingEnd &&
-               std::isspace(static_cast<unsigned char>(*loggingEnd))) {
-            ++loggingEnd;
-        }
-
-        if (loggingEnd == loggingBegin ||
-            (loggingEnd && *loggingEnd != '\0') ||
-            (configuredLogging != 0 && configuredLogging != 1)) {
-            m_loggingEnabled = true;
-            logging = 1;
-            saveConfig = true;
-        }
-        else {
-            m_loggingEnabled = configuredLogging != 0;
-        }
+        m_loggingEnabled = LoadBooleanSetting(
+            "Logging", true, saveConfig);
+        m_showWorldArrow = LoadBooleanSetting(
+            "ShowWorldArrow", false, saveConfig);
 
         if (saveConfig)
             m_config.save();
@@ -172,6 +184,12 @@ struct Main {
         std::ofstream log(m_logPath, std::ios::app);
         if (log)
             log << message << '\n';
+    }
+
+    int32_t GetBlipDisplayMode() const {
+        return m_showWorldArrow
+            ? BLIP_DISPLAY_ARROW_AND_MAP
+            : BLIP_DISPLAY_MAP_ONLY;
     }
 
     void ResolvePigeonModelIndices() {
@@ -222,7 +240,7 @@ struct Main {
         Command<void, Commands::CHANGE_BLIP_SPRITE>(blip, SPRITE_LEVEL);
         Command<void, Commands::CHANGE_BLIP_COLOUR>(blip, ENEMY_BLIP_COLOUR);
         Command<void, Commands::CHANGE_BLIP_DISPLAY>(
-            blip, BLIP_DISPLAY_ARROW_AND_MAP);
+            blip, GetBlipDisplayMode());
         Command<void, Commands::CHANGE_BLIP_SCALE>(blip, 0.75f);
         Command<void, Commands::SET_BLIP_AS_SHORT_RANGE>(blip, true);
 
@@ -339,7 +357,7 @@ struct Main {
         Command<void, Commands::CHANGE_BLIP_COLOUR>(
             blip, ENEMY_BLIP_COLOUR);
         Command<void, Commands::CHANGE_BLIP_DISPLAY>(
-            blip, BLIP_DISPLAY_ARROW_AND_MAP);
+            blip, GetBlipDisplayMode());
         Command<void, Commands::CHANGE_BLIP_SCALE>(
             blip, 0.75f);
         Command<void, Commands::SET_BLIP_AS_SHORT_RANGE>(
