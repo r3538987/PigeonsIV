@@ -2,6 +2,8 @@
 
 Pigeons.IV is a GTA IV and Episodes from Liberty City ASI plugin that displays nearby collectible birds on the radar. It supports the 200 pigeons in the base game and both sets of 50 seagulls in The Lost and Damned and The Ballad of Gay Tony.
 
+![Sample.](sample.jpg)
+
 ## Credits and original work
 
 This mod was made possible by the following projects and authors. Please credit them when redistributing this source or a derivative work.
