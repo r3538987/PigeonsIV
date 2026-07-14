@@ -1,6 +1,7 @@
 #include <plugin.h> // Plugin-SDK version 1004 from 2026-04-18 13:03:53
 #include <CModelInfo.h>
 #include <CObject.h>
+#include <CPad.h>
 #include <CPools.h>
 #include <CRadar.h>
 #include <CTimer.h>
@@ -36,6 +37,8 @@ constexpr float MIN_SEARCH_RADIUS = 10.0f;
 constexpr float MAX_SEARCH_RADIUS = 500.0f;
 constexpr float LOCATION_MATCH_RADIUS = 4.0f;
 constexpr int32_t ENEMY_BLIP_COLOUR = 9;
+constexpr int32_t RADAR_BLIPS_VARIANT = 1;
+constexpr int32_t VIBRATION_HINTS_VARIANT = 2;
 constexpr uint32_t SEAGULL_MODEL_HASH = 0x9C7509BA; // CJ_SEAGULL
 
 constexpr std::array<uint32_t, 5> PIGEON_MODEL_HASHES = {
@@ -58,21 +61,41 @@ struct NativeCollectibleBlip {
 
 using NativeBlipMap = std::unordered_map<size_t, NativeCollectibleBlip>;
 
+struct NearestCollectible {
+    bool available = false;
+    float distanceSquared = 0.0f;
+    size_t locationIndex = 0;
+    const char* name = "collectible";
+};
+
+struct VibrationPattern {
+    uint32_t intervalMs;
+    int32_t durationMs;
+    int32_t strength;
+};
+
 struct Main {
     config_file m_config{true, false};
     std::array<int32_t, PIGEON_MODEL_HASHES.size()> m_pigeonModelIndices{};
+    int32_t m_seagullModelIndex = -1;
     std::unordered_map<int32_t, int32_t> m_blipsByObject;
     NativeBlipMap m_nativePigeonBlipsByLocation;
     NativeBlipMap m_nativeSeagullBlipsByLocation;
     std::string m_logPath;
     float m_searchRadius = DEFAULT_SEARCH_RADIUS;
+    int32_t m_variant = RADAR_BLIPS_VARIANT;
     bool m_loggingEnabled = true;
     bool m_showWorldArrow = false;
+    NearestCollectible m_nearestCollectible;
     uint32_t m_lastScanTime = 0;
     uint32_t m_lastStatusLogTime = 0;
+    uint32_t m_lastVibrationTime = 0;
     int32_t m_lastEpisode = -1;
     bool m_modelIndicesResolved = false;
     bool m_scanTimerStarted = false;
+    bool m_vibrationTimerStarted = false;
+    bool m_firstVibrationAttempted = false;
+    bool m_firstVibrationCompleted = false;
     bool m_playerWasAvailable = false;
 
     Main() {
@@ -86,6 +109,10 @@ struct Main {
                 log << "Pigeons.IV started. Waiting for gameplay.\n";
                 log << "Configured collectible search radius: "
                     << m_searchRadius << " metres.\n";
+                log << "Configured assist variant: " << m_variant
+                    << (m_variant == RADAR_BLIPS_VARIANT
+                        ? " (multiple radar blips).\n"
+                        : " (nearest-target vibration hints).\n");
             }
         }
 
@@ -128,6 +155,42 @@ struct Main {
         return configuredValue != 0;
     }
 
+    int32_t LoadIntegerSetting(
+        const char* name,
+        int32_t defaultValue,
+        int32_t minimumValue,
+        int32_t maximumValue,
+        bool& saveConfig) {
+        auto& setting = m_config[name];
+
+        if (setting.isEmpty()) {
+            setting = defaultValue;
+            saveConfig = true;
+        }
+
+        const char* valueBegin = setting._value.c_str();
+        char* valueEnd = nullptr;
+        const long configuredValue = std::strtol(
+            valueBegin,
+            &valueEnd,
+            10);
+        while (valueEnd &&
+               std::isspace(static_cast<unsigned char>(*valueEnd))) {
+            ++valueEnd;
+        }
+
+        if (valueEnd == valueBegin ||
+            (valueEnd && *valueEnd != '\0') ||
+            configuredValue < minimumValue ||
+            configuredValue > maximumValue) {
+            setting = defaultValue;
+            saveConfig = true;
+            return defaultValue;
+        }
+
+        return static_cast<int32_t>(configuredValue);
+    }
+
     void LoadConfig() {
         m_config.setUseEqualitySign(true);
         auto& distance = m_config["Distance"];
@@ -162,6 +225,13 @@ struct Main {
             saveConfig = true;
         }
 
+        m_variant = LoadIntegerSetting(
+            "Variant",
+            RADAR_BLIPS_VARIANT,
+            RADAR_BLIPS_VARIANT,
+            VIBRATION_HINTS_VARIANT,
+            saveConfig);
+
         m_loggingEnabled = LoadBooleanSetting(
             "Logging", true, saveConfig);
         m_showWorldArrow = LoadBooleanSetting(
@@ -186,8 +256,8 @@ struct Main {
             log << message << '\n';
     }
 
-    int32_t GetBlipDisplayMode() const {
-        return m_showWorldArrow
+    int32_t GetBlipDisplayMode(bool showWorldArrow) const {
+        return showWorldArrow
             ? BLIP_DISPLAY_ARROW_AND_MAP
             : BLIP_DISPLAY_MAP_ONLY;
     }
@@ -228,11 +298,16 @@ struct Main {
         return false;
     }
 
-    void CreatePigeonBlip(CObject* object, int32_t objectHandle) {
+    void CreateCollectibleObjectBlip(
+        CObject* object,
+        int32_t objectHandle,
+        const char* collectibleName,
+        int32_t displayMode) {
         int32_t blip = 0;
         Command<void, Commands::ADD_BLIP_FOR_OBJECT>(objectHandle, &blip);
         if (!blip) {
-            Log("Pigeon object %d was found, but ADD_BLIP_FOR_OBJECT returned no blip.",
+            Log("%s object %d was found, but ADD_BLIP_FOR_OBJECT returned no blip.",
+                collectibleName,
                 objectHandle);
             return;
         }
@@ -240,7 +315,7 @@ struct Main {
         Command<void, Commands::CHANGE_BLIP_SPRITE>(blip, SPRITE_LEVEL);
         Command<void, Commands::CHANGE_BLIP_COLOUR>(blip, ENEMY_BLIP_COLOUR);
         Command<void, Commands::CHANGE_BLIP_DISPLAY>(
-            blip, GetBlipDisplayMode());
+            blip, displayMode);
         Command<void, Commands::CHANGE_BLIP_SCALE>(blip, 0.75f);
         Command<void, Commands::SET_BLIP_AS_SHORT_RANGE>(blip, true);
 
@@ -255,15 +330,18 @@ struct Main {
                 0.0f
             };
 
-        Log("Created blip %d for pigeon object %d (model=%d, pos=%.2f %.2f %.2f).",
-            blip, objectHandle, object->m_nModelIndex,
+        Log("Created blip %d for %s object %d (model=%d, display=%d, pos=%.2f %.2f %.2f).",
+            blip, collectibleName, objectHandle, object->m_nModelIndex,
+            displayMode,
             position.x, position.y, position.z);
     }
 
     void RemoveBlip(int32_t objectHandle, int32_t blip) const {
         if (blip)
             Command<void, Commands::REMOVE_BLIP>(blip);
-        Log("Removed blip %d for pigeon object %d.", blip, objectHandle);
+        Log("Removed object-attached collectible blip %d for object %d.",
+            blip,
+            objectHandle);
     }
 
     void ClearNativeBlips(
@@ -316,6 +394,87 @@ struct Main {
         return dx * dx + dy * dy + dz * dz;
     }
 
+    void ConsiderNearestCollectible(
+        size_t locationIndex,
+        const char* collectibleName,
+        const rage::Vector3& playerPosition,
+        const rage::Vector3& collectiblePosition) {
+        const float distanceSquared = DistanceSquared(
+            playerPosition,
+            collectiblePosition);
+        if (m_nearestCollectible.available &&
+            distanceSquared >= m_nearestCollectible.distanceSquared) {
+            return;
+        }
+
+        m_nearestCollectible.available = true;
+        m_nearestCollectible.distanceSquared = distanceSquared;
+        m_nearestCollectible.locationIndex = locationIndex;
+        m_nearestCollectible.name = collectibleName;
+    }
+
+    VibrationPattern GetVibrationPattern(float distance) const {
+        if (distance <= 25.0f)
+            return {450, 220, 255};
+        if (distance <= 50.0f)
+            return {700, 180, 220};
+        if (distance <= 100.0f)
+            return {1100, 150, 180};
+        if (distance <= 200.0f)
+            return {1700, 120, 140};
+        return {2700, 90, 100};
+    }
+
+    void UpdateVibrationHints(uint32_t now) {
+        if (m_variant != VIBRATION_HINTS_VARIANT ||
+            !m_nearestCollectible.available ||
+            CTimer::GetUserPause() ||
+            CTimer::GetCodePause()) {
+            m_vibrationTimerStarted = false;
+            return;
+        }
+
+        const float distance = std::sqrt(
+            m_nearestCollectible.distanceSquared);
+        const VibrationPattern pattern = GetVibrationPattern(distance);
+        if (m_vibrationTimerStarted &&
+            now - m_lastVibrationTime < pattern.intervalMs) {
+            return;
+        }
+
+        CPad* pad = CPad::GetPad(0);
+        if (!pad) {
+            if (!m_firstVibrationAttempted) {
+                Log("Could not start vibration hint because player pad 0 is unavailable.");
+                m_firstVibrationAttempted = true;
+            }
+            return;
+        }
+
+        if (!m_firstVibrationAttempted) {
+            Log("Starting first vibration hint through CPad (duration=%d strength=%d distance=%.1f).",
+                pattern.durationMs,
+                pattern.strength,
+                distance);
+            m_firstVibrationAttempted = true;
+        }
+
+        pad->StartShake(
+            static_cast<uint32_t>(pattern.durationMs),
+            pattern.strength,
+            0,
+            0,
+            0,
+            false);
+
+        if (!m_firstVibrationCompleted) {
+            Log("First CPad vibration hint completed without an access violation.");
+            m_firstVibrationCompleted = true;
+        }
+        m_lastVibrationTime = now;
+        m_vibrationTimerStarted = true;
+    }
+
     template <size_t ModelCount>
     uint32_t FindCollectibleModelAt(
         const rage::Vector3& position,
@@ -336,7 +495,8 @@ struct Main {
         const rage::Vector3& position,
         uint32_t modelHash,
         NativeBlipMap& blipsByLocation,
-        const char* collectibleName) {
+        const char* collectibleName,
+        bool showWorldArrow) {
         int32_t blip = 0;
         Command<void, Commands::ADD_BLIP_FOR_COORD>(
             position.x,
@@ -357,7 +517,7 @@ struct Main {
         Command<void, Commands::CHANGE_BLIP_COLOUR>(
             blip, ENEMY_BLIP_COLOUR);
         Command<void, Commands::CHANGE_BLIP_DISPLAY>(
-            blip, GetBlipDisplayMode());
+            blip, GetBlipDisplayMode(showWorldArrow));
         Command<void, Commands::CHANGE_BLIP_SCALE>(
             blip, 0.75f);
         Command<void, Commands::SET_BLIP_AS_SHORT_RANGE>(
@@ -383,7 +543,8 @@ struct Main {
         const std::array<rage::Vector3, LocationCount>& locations,
         const std::array<uint32_t, ModelCount>& modelHashes,
         NativeBlipMap& blipsByLocation,
-        const char* collectibleName) {
+        const char* collectibleName,
+        bool showWorldArrow) {
         const rage::Vector3 playerPosition = GetEntityPosition(player);
         const float searchRadiusSquared =
             m_searchRadius * m_searchRadius;
@@ -401,13 +562,21 @@ struct Main {
                 continue;
 
             detectedLocations.insert(i);
-            if (!blipsByLocation.contains(i)) {
+            if (m_variant == VIBRATION_HINTS_VARIANT) {
+                ConsiderNearestCollectible(
+                    i,
+                    collectibleName,
+                    playerPosition,
+                    position);
+            }
+            else if (!blipsByLocation.contains(i)) {
                 CreateNativeCollectibleBlip(
                     i,
                     position,
                     modelHash,
                     blipsByLocation,
-                    collectibleName);
+                    collectibleName,
+                    showWorldArrow);
             }
         }
 
@@ -459,6 +628,7 @@ struct Main {
             ClearNativeBlips(m_nativePigeonBlipsByLocation, "pigeon");
             ClearNativeBlips(m_nativeSeagullBlipsByLocation, "seagull");
             m_lastEpisode = gGameEpisode;
+            m_seagullModelIndex = -1;
             Log("Active episode: %s (%d).",
                 GetEpisodeName(gGameEpisode),
                 gGameEpisode);
@@ -469,7 +639,8 @@ struct Main {
                 CBaseModelInfo* modelInfo = CModelInfo::GetModelByHash(
                     static_cast<int32_t>(SEAGULL_MODEL_HASH),
                     &modelIndex);
-                if (modelInfo) {
+                if (modelInfo && modelIndex <= INT16_MAX) {
+                    m_seagullModelIndex = static_cast<int32_t>(modelIndex);
                     Log("Resolved seagull hash 0x%08X (CJ_SEAGULL) to model index %u.",
                         SEAGULL_MODEL_HASH,
                         modelIndex);
@@ -488,7 +659,8 @@ struct Main {
                 PIGEON_LOCATIONS,
                 PIGEON_MODEL_HASHES,
                 m_nativePigeonBlipsByLocation,
-                "pigeon");
+                "pigeon",
+                m_showWorldArrow);
             break;
         case EPISODE_TLAD:
             ScanNativeCollectiblePresence(
@@ -496,7 +668,8 @@ struct Main {
                 TLAD_SEAGULL_LOCATIONS,
                 SEAGULL_MODEL_HASHES,
                 m_nativeSeagullBlipsByLocation,
-                "seagull");
+                "seagull",
+                false);
             break;
         case EPISODE_TBOGT:
             ScanNativeCollectiblePresence(
@@ -504,7 +677,8 @@ struct Main {
                 TBOGT_SEAGULL_LOCATIONS,
                 SEAGULL_MODEL_HASHES,
                 m_nativeSeagullBlipsByLocation,
-                "seagull");
+                "seagull",
+                false);
             break;
         }
     }
@@ -520,8 +694,11 @@ struct Main {
             return;
         }
 
-        std::unordered_set<int32_t> seenPigeonHandles;
+        std::unordered_set<int32_t> seenCollectibleHandles;
         int32_t occupiedObjects = 0;
+        uint32_t poolPigeons = 0;
+        uint32_t poolSeagulls = 0;
+        m_nearestCollectible = {};
 
         for (int32_t slot = 0; slot < poolSize; ++slot) {
             CObject* object = objectPool->GetSlot(slot);
@@ -529,20 +706,48 @@ struct Main {
                 continue;
 
             ++occupiedObjects;
-            if (gGameEpisode != EPISODE_IV ||
-                !IsPigeonModel(object->m_nModelIndex)) {
+            const bool isPigeon =
+                gGameEpisode == EPISODE_IV &&
+                IsPigeonModel(object->m_nModelIndex);
+            const bool isSeagull =
+                (gGameEpisode == EPISODE_TLAD ||
+                 gGameEpisode == EPISODE_TBOGT) &&
+                m_seagullModelIndex >= 0 &&
+                object->m_nModelIndex == m_seagullModelIndex;
+            if (!isPigeon && !isSeagull) {
                 continue;
             }
 
             const int32_t objectHandle = CPools::GetObjectRef(object);
-            seenPigeonHandles.insert(objectHandle);
+            seenCollectibleHandles.insert(objectHandle);
+            if (isPigeon)
+                ++poolPigeons;
+            else
+                ++poolSeagulls;
 
-            if (!m_blipsByObject.contains(objectHandle))
-                CreatePigeonBlip(object, objectHandle);
+            if (m_variant != RADAR_BLIPS_VARIANT ||
+                m_blipsByObject.contains(objectHandle)) {
+                continue;
+            }
+
+            if (isPigeon) {
+                CreateCollectibleObjectBlip(
+                    object,
+                    objectHandle,
+                    "pigeon",
+                    GetBlipDisplayMode(m_showWorldArrow));
+            }
+            else if (m_showWorldArrow) {
+                CreateCollectibleObjectBlip(
+                    object,
+                    objectHandle,
+                    "seagull",
+                    BLIP_DISPLAY_ARROW_ONLY);
+            }
         }
 
         for (auto it = m_blipsByObject.begin(); it != m_blipsByObject.end();) {
-            if (!seenPigeonHandles.contains(it->first)) {
+            if (!seenCollectibleHandles.contains(it->first)) {
                 RemoveBlip(it->first, it->second);
                 it = m_blipsByObject.erase(it);
             }
@@ -556,13 +761,26 @@ struct Main {
         if (m_lastStatusLogTime == 0 ||
             now - m_lastStatusLogTime >= STATUS_LOG_INTERVAL_MS) {
             m_lastStatusLogTime = now;
-            Log("Scan status: episode=%d pool=%d occupied=%d poolPigeons=%u objectBlips=%u nativePigeonBlips=%u nativeSeagullBlips=%u.",
+            const float nearestDistance = m_nearestCollectible.available
+                ? std::sqrt(m_nearestCollectible.distanceSquared)
+                : -1.0f;
+            Log("Scan status: variant=%d episode=%d pool=%d occupied=%d poolPigeons=%u poolSeagulls=%u objectBlips=%u nativePigeonBlips=%u nativeSeagullBlips=%u nearest=%s:%u nearestDistance=%.1f.",
+                m_variant,
                 gGameEpisode,
                 poolSize, occupiedObjects,
-                static_cast<unsigned int>(seenPigeonHandles.size()),
+                poolPigeons,
+                poolSeagulls,
                 static_cast<unsigned int>(m_blipsByObject.size()),
                 static_cast<unsigned int>(m_nativePigeonBlipsByLocation.size()),
-                static_cast<unsigned int>(m_nativeSeagullBlipsByLocation.size()));
+                static_cast<unsigned int>(m_nativeSeagullBlipsByLocation.size()),
+                m_nearestCollectible.available
+                    ? m_nearestCollectible.name
+                    : "none",
+                m_nearestCollectible.available
+                    ? static_cast<unsigned int>(
+                        m_nearestCollectible.locationIndex + 1)
+                    : 0,
+                nearestDistance);
         }
     }
 
@@ -577,6 +795,8 @@ struct Main {
             }
             m_playerWasAvailable = false;
             m_scanTimerStarted = false;
+            m_vibrationTimerStarted = false;
+            m_nearestCollectible = {};
             m_lastEpisode = -1;
             return;
         }
@@ -589,11 +809,14 @@ struct Main {
             ResolvePigeonModelIndices();
 
         const uint32_t now = CTimer::GetTimeInMilliseconds();
-        if (m_scanTimerStarted && now - m_lastScanTime < SCAN_INTERVAL_MS)
+        if (m_scanTimerStarted && now - m_lastScanTime < SCAN_INTERVAL_MS) {
+            UpdateVibrationHints(now);
             return;
+        }
 
         m_scanTimerStarted = true;
         m_lastScanTime = now;
         ScanForCollectibles(now, player);
+        UpdateVibrationHints(now);
     }
 } gInstance;

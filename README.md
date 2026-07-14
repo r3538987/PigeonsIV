@@ -33,6 +33,7 @@ Grand Theft Auto IV, The Lost and Damned, The Ballad of Gay Tony, their world, m
 - Shows live, uncollected TLAD or TBoGT seagulls using the correct episode-specific locations.
 - Tracks multiple collectibles simultaneously instead of switching a single marker between targets.
 - Uses red enemy-style radar dots.
+- Offers an alternative nearest-target vibration mode with stronger, faster pulses as the player gets closer.
 - Removes markers when a collectible is destroyed, unloaded, or leaves the configured radius.
 - Allows a detection radius from 10 to 500 in-game metres.
 - Provides optional diagnostic logging.
@@ -60,14 +61,29 @@ Edit `Pigeons.IV.ini` and restart the game after making changes:
 ; Valid distance range: 10 to 500 metres.
 Distance = 300.0
 
+; Assist mode: 1 = multiple radar blips, 2 = vibration hints for the nearest collectible.
+Variant = 1
+
 ; Set to 0 to disable Pigeons.IV.log writes, or 1 to enable them.
 Logging = 1
 
-; Set to 1 to show an arrow above each collectible, or 0 for radar/map only.
+; Set to 1 to show an arrow above each pigeon or seagull, or 0 for radar/map only.
 ShowWorldArrow = 0
 ```
 
-`Distance` values outside the valid range are clamped and saved back to the INI. Setting `Logging` to `0` prevents new log writes but does not delete an existing log file. `ShowWorldArrow = 0` keeps the red collectible blips on the radar and pause map without drawing arrows over the objects in the world.
+`Distance` values outside the valid range are clamped and saved back to the INI. `Variant = 1` preserves the original behavior and can display multiple collectible blips at once. `Variant = 2` creates no collectible blips; it selects the nearest currently detected bird and pulses the controller more strongly and frequently as the distance closes. It follows the game's vibration preference and pauses its hints while the game is paused or faded out.
+
+Setting `Logging` to `0` prevents new log writes but does not delete an existing log file. `ShowWorldArrow` controls arrows for both GTA IV pigeons and TLAD/TBoGT seagulls and applies only to variant 1. The shared setting uses different internal rendering paths: pigeon arrows use the normal collectible blips, while seagull radar dots remain coordinate-based and their world arrows are attached directly to streamed seagull objects.
+
+Variant 2 uses these built-in distance bands:
+
+| Distance | Hint pattern |
+| --- | --- |
+| Up to 25 m | Strongest, fastest pulse |
+| 25-50 m | Very strong, fast pulse |
+| 50-100 m | Strong, medium pulse |
+| 100-200 m | Moderate, slow pulse |
+| Over 200 m | Weakest, slowest pulse |
 
 ## Supported collectibles
 
