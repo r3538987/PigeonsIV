@@ -46,6 +46,8 @@ The plugin checks known collectible coordinates near the player and asks the gam
 
 This approach does not parse save files. Detection depends on the game streaming the collectible object into the world, so very large configured distances may not always produce a marker at the full radius.
 
+Scan and vibration timing use the game's `GET_GAME_TIMER` native to avoid the unused Plugin-SDK timer initialization that conflicts with FusionFix 5.1.x. Vibration pause flags are resolved separately with checked bindings; if they cannot be resolved safely, vibration hints are disabled and the reason is logged when logging is enabled.
+
 ## Installation
 
 1. Install an ASI loader compatible with your GTA IV version.

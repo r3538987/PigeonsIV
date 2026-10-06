@@ -4,7 +4,6 @@
 #include <CPad.h>
 #include <CPools.h>
 #include <CRadar.h>
-#include <CTimer.h>
 #include <common.h>
 #include <eModelHashes.h>
 #include <extensions/Config.h>
@@ -20,6 +19,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -97,6 +97,9 @@ struct Main {
     bool m_firstVibrationAttempted = false;
     bool m_firstVibrationCompleted = false;
     bool m_playerWasAvailable = false;
+    bool m_pauseFlagsResolved = false;
+    const bool* m_userPause = nullptr;
+    const bool* m_codePause = nullptr;
 
     Main() {
         m_pigeonModelIndices.fill(-1);
@@ -425,11 +428,60 @@ struct Main {
         return {2700, 90, 100};
     }
 
+    bool AreVibrationHintsPaused() {
+        if (!m_pauseFlagsResolved) {
+            m_pauseFlagsResolved = true;
+
+            // Bind only the two pause flags. Referencing SDK CTimer members
+            // also initializes its unused frame counter, whose signature is
+            // overwritten by FusionFix 5.1.x.
+            auto pausePattern = hook::pattern(
+                "0A 05 ? ? ? ? 0A 05 ? ? ? ? 74 0D 80 3D ? ? ? ? ? 0F 84 ? ? ? ? A1");
+            if (pausePattern.size() != 1) {
+                Log("Pause flags could not be resolved uniquely; vibration hints disabled.");
+                return true;
+            }
+
+            const auto* instructions = pausePattern.get(0).get<uint8_t>();
+            const bool* userPause = nullptr;
+            const bool* codePause = nullptr;
+            std::memcpy(&userPause, instructions + 2, sizeof(userPause));
+            std::memcpy(&codePause, instructions + 8, sizeof(codePause));
+
+            const auto isReadable = [](const void* address) {
+                MEMORY_BASIC_INFORMATION region{};
+                if (!address ||
+                    VirtualQuery(address, &region, sizeof(region)) != sizeof(region) ||
+                    region.State != MEM_COMMIT ||
+                    (region.Protect & PAGE_GUARD)) {
+                    return false;
+                }
+                const DWORD protection = region.Protect & 0xFF;
+                return protection == PAGE_READONLY ||
+                    protection == PAGE_READWRITE ||
+                    protection == PAGE_WRITECOPY ||
+                    protection == PAGE_EXECUTE_READ ||
+                    protection == PAGE_EXECUTE_READWRITE ||
+                    protection == PAGE_EXECUTE_WRITECOPY;
+            };
+            if (!isReadable(userPause) || !isReadable(codePause)) {
+                Log("Pause flag addresses are unreadable; vibration hints disabled.");
+                return true;
+            }
+
+            m_userPause = userPause;
+            m_codePause = codePause;
+            Log("Pause flags resolved for vibration hints without SDK CTimer initialization.");
+        }
+
+        // Failed bindings keep hints disabled instead of reading invalid memory.
+        return !m_userPause || !m_codePause || *m_userPause || *m_codePause;
+    }
+
     void UpdateVibrationHints(uint32_t now) {
         if (m_variant != VIBRATION_HINTS_VARIANT ||
             !m_nearestCollectible.available ||
-            CTimer::GetUserPause() ||
-            CTimer::GetCodePause()) {
+            AreVibrationHintsPaused()) {
             m_vibrationTimerStarted = false;
             return;
         }
@@ -808,7 +860,9 @@ struct Main {
         if (gGameEpisode == EPISODE_IV)
             ResolvePigeonModelIndices();
 
-        const uint32_t now = CTimer::GetTimeInMilliseconds();
+        uint32_t now = 0;
+        // GTA IV's GET_GAME_TIMER writes through an output pointer.
+        Command<void, Commands::GET_GAME_TIMER>(&now);
         if (m_scanTimerStarted && now - m_lastScanTime < SCAN_INTERVAL_MS) {
             UpdateVibrationHints(now);
             return;
